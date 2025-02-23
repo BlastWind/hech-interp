@@ -26,19 +26,37 @@ common base
     , binary >= 0.8.9
     , bytestring >= 0.12
     , containers >= 0.6.8
+    , ghc-typelits-natnormalise >= 0.7.10
+    , ghc-typelits-knownnat == 0.7.12
+    , ghc-typelits-extra == 0.4.7
+    , binary
+    , ghc
+    , ghc-typelits-extra
+    , ghc-typelits-knownnat
+    , ghc-typelits-natnormalise
+    , hashmap
+    , libtorch-ffi
+    , libtorch-ffi-helper
+    , safe-exceptions
+    , transformers
 
 common binary-base
   import: base
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
-  build-depends: hasktorch-skeleton
+  build-depends: 
+    hasktorch-skeleton
 
 library
   import: base
   exposed-modules:
     HasktorchSkeleton
-    GPT2.Model
+    GPT2
     SafeTensors
   hs-source-dirs: src
+  ghc-options:
+    -fplugin GHC.TypeLits.Normalise -fplugin
+    GHC.TypeLits.KnownNat.Solver -fplugin GHC.TypeLits.Extra.Solver
+    -fconstraint-solver-iterations=0 -fplugin GHC.NotExport.Plugin
 
 executable example
   import: binary-base
