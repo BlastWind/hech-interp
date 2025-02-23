@@ -20,6 +20,12 @@
         };
         ghcWithHasktorch = pkgs.haskellPackages.ghcWithPackages (pkgs: with pkgs; [
           hasktorch
+          libtorch-ffi
+          safe-exceptions
+          aeson
+          binary
+          bytestring
+          containers
           haskell-language-server
         ]);
       in {

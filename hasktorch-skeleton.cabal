@@ -20,6 +20,12 @@ common base
   build-depends:
       base >= 4.12 && < 5
     , hasktorch >= 0.2 && < 0.3
+    , libtorch-ffi >= 2.0
+    , safe-exceptions >= 0.1.7
+    , aeson >= 2.2
+    , binary >= 0.8.9
+    , bytestring >= 0.12
+    , containers >= 0.6.8
 
 common binary-base
   import: base
@@ -30,6 +36,8 @@ library
   import: base
   exposed-modules:
     HasktorchSkeleton
+    GPT2.Model
+    SafeTensors
   hs-source-dirs: src
 
 executable example
