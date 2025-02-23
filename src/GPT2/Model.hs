@@ -46,6 +46,11 @@ residual f g x = f x >>= (\x' -> g (x `add` x'))
 
 traceTensor ten = trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic ten) ten
 
+-- TODO type level map to Tensors depending on type of index.
+-- Right now we just return the attention layer cached
+-- Eventually we want to return the activations of all layers.
+type Cache device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
+
 geluApproximate ::
   forall shape dtype device.
   (GeluDTypeIsValid device dtype) =>
@@ -114,14 +119,15 @@ multiheadAttention ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | attention and attention averaged over heads
-  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
+  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
 multiheadAttention MultiheadAttention {..} attentionMask query key value = do
-  let weights =
+  let weights :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen] =
         softmax @3
           . _maskAttention
           $ _attentionWeights
-  return $ _attention weights
+  return $ (_attention weights, weights)
   where
+    -- this is "pattern" 
     _attentionWeights =
       let scaling = Prelude.sqrt . fromIntegral $ natValI @headDim :: Double
           q = reshape' . forward mhaQInProj $ query
@@ -132,8 +138,11 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value = do
       case attentionMask of
         Nothing -> attentionWeights
         Just am -> attentionWeights `add` unsqueeze @1 am
+    -- this is "result"
     _attention attentionWeights =
+          -- this is "v"
       let v = reshape' . forward mhaVInProj $ value
+          -- this is "z"
           attention = transpose @1 @2 $ matmul attentionWeights v
        in forward mhaOutProj . reshape @'[batchSize, inputSeqLen, numEmbeds] $ attention
     reshape' ::
@@ -307,9 +316,10 @@ transformerLayer TransformerLayer {..} attentionMask query key value =
       value' = forward transformerLayer_ln value
       f query' = multiheadAttention transformerLayer_mha attentionMask query' key' value'
    in -- _ <- print . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll . toDynamic $ fst r
-      do
-        result <- (query `add`) <$> f (forward transformerLayer_ln query)
-        transformerMLP transformerLayer_mlp result
+      do -- TODO return cache here too?
+        (result, cache) <- f (forward transformerLayer_ln query)
+        let result' = query `add` result
+        transformerMLP transformerLayer_mlp result'
 
 instance
   ( All KnownNat '[numEmbeds, numEmbeds, numEmbeds, numHeads, ffnDim],
@@ -496,7 +506,7 @@ transformerLM ::
   ) =>
   GPT2 numAttnLayers numHeads ffnDim paddingIdx maxSeqLen vocabSize numEmbeds dtype device ->
   Tensor device 'D.Int64 '[batchSize, inputSeqLen] ->
-  IO (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
+  IO (Tensor device dtype '[batchSize, inputSeqLen, vocabSize], Cache device dtype batchSize numHeads inputSeqLen)
 transformerLM GPT2 {..} xTokens = do
   let x = embed tEmbedding xTokens
       positions =
@@ -518,11 +528,15 @@ transformerLM GPT2 {..} xTokens = do
   -- _ <- print $ shape x
   -- _ <- print (T.select 0 0 . T.squeezeAll $ toDynamic x)
   y <- hfoldrM (FoldLayers attentionMask') x' tLayers
-  return
+  let foo = forward tFinalLN y
+  let bar = forward tProj foo
+  -- TODO
+  return (bar, undefined)
+  --return
     -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
     -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
-    . forward tProj
-    $ forward tFinalLN y
+  --  . forward tProj
+  --  $ 
 
 instance
   ( All KnownNat '[paddingIdx, numEmbeds, inputSeqLen, batchSize, inputSeqLen],
@@ -541,7 +555,7 @@ instance
     KnownDType dtype,
     KnownDevice device
   ) =>
-  HasForward (GPT2 numAttnLayers numHeads ffnDim paddingIdx inputSeqLen vocabSize numEmbeds dtype device) (Tensor device 'D.Int64 '[batchSize, inputSeqLen]) (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
+  HasForward (GPT2 numAttnLayers numHeads ffnDim paddingIdx inputSeqLen vocabSize numEmbeds dtype device) (Tensor device 'D.Int64 '[batchSize, inputSeqLen]) (Tensor device dtype '[batchSize, inputSeqLen, vocabSize], Cache device dtype batchSize numHeads inputSeqLen)
   where
   forward model input = unsafePerformIO $ transformerLM model input
   forwardStoch model input = transformerLM model input
