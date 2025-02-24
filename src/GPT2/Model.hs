@@ -310,7 +310,7 @@ transformerLayer ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | transformer layer output representation
-  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
+  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
 transformerLayer TransformerLayer {..} attentionMask query key value =
   let key' = forward transformerLayer_ln key
       value' = forward transformerLayer_ln value
@@ -319,7 +319,8 @@ transformerLayer TransformerLayer {..} attentionMask query key value =
       do -- TODO return cache here too?
         (result, cache) <- f (forward transformerLayer_ln query)
         let result' = query `add` result
-        transformerMLP transformerLayer_mlp result'
+        foo <- transformerMLP transformerLayer_mlp result'
+        return (foo, cache)
 
 instance
   ( All KnownNat '[numEmbeds, numEmbeds, numEmbeds, numHeads, ffnDim],
@@ -469,7 +470,7 @@ instance
     ( TransformerLayer numEmbeds numHeads ffnDim dtype device,
       IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
     )
-    (IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]))
+    (IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen))
   where
   apply' FoldLayers {..} (layer, mx) = do
     x <- mx
@@ -506,7 +507,7 @@ transformerLM ::
   ) =>
   GPT2 numAttnLayers numHeads ffnDim paddingIdx maxSeqLen vocabSize numEmbeds dtype device ->
   Tensor device 'D.Int64 '[batchSize, inputSeqLen] ->
-  IO (Tensor device dtype '[batchSize, inputSeqLen, vocabSize], Cache device dtype batchSize numHeads inputSeqLen)
+  IO (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
 transformerLM GPT2 {..} xTokens = do
   let x = embed tEmbedding xTokens
       positions =
@@ -528,15 +529,11 @@ transformerLM GPT2 {..} xTokens = do
   -- _ <- print $ shape x
   -- _ <- print (T.select 0 0 . T.squeezeAll $ toDynamic x)
   y <- hfoldrM (FoldLayers attentionMask') x' tLayers
-  let foo = forward tFinalLN y
-  let bar = forward tProj foo
-  -- TODO
-  return (bar, undefined)
-  --return
+  return
     -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
     -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
-  --  . forward tProj
-  --  $ 
+    . forward tProj
+    $ forward tFinalLN y
 
 instance
   ( All KnownNat '[paddingIdx, numEmbeds, inputSeqLen, batchSize, inputSeqLen],
@@ -555,7 +552,7 @@ instance
     KnownDType dtype,
     KnownDevice device
   ) =>
-  HasForward (GPT2 numAttnLayers numHeads ffnDim paddingIdx inputSeqLen vocabSize numEmbeds dtype device) (Tensor device 'D.Int64 '[batchSize, inputSeqLen]) (Tensor device dtype '[batchSize, inputSeqLen, vocabSize], Cache device dtype batchSize numHeads inputSeqLen)
+  HasForward (GPT2 numAttnLayers numHeads ffnDim paddingIdx inputSeqLen vocabSize numEmbeds dtype device) (Tensor device 'D.Int64 '[batchSize, inputSeqLen]) (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
   where
   forward model input = unsafePerformIO $ transformerLM model input
   forwardStoch model input = transformerLM model input
