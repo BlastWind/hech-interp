@@ -1,16 +1,16 @@
 resolver: lts-23.7
 
-compiler: ghc-9.8.4
+# compiler: ghc-9.8.4
 
 packages:
 - .
 
-allow-newer: true
+# allow-newer: true
 
 system-ghc: true
 
 nix:
-  enable: false
+  enable: true
 
 extra-deps:
   - streaming-commons-0.2.2.6

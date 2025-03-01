@@ -1,6 +1,6 @@
 {
   nixConfig = {
-    bash-prompt = "\[hasktorch-skeleton$(__git_ps1 \" (%s)\")\]$ ";
+    bash-prompt = "[hech-interp]$ ";
   };
   inputs = {
     utils.url = "github:numtide/flake-utils";
@@ -14,11 +14,15 @@
           inherit system;
           config.allowUnfree = true;
           config.cudaSupport = system == "x86_64-linux";
-          # config.ihaskell.packages = pkgs: with pkgs; [
-          #   hasktorch
-          # ];
+          config.ihaskell.packages = pkgs: with pkgs; [
+            hasktorch
+          ];
         };
-        ghcWithHasktorch = pkgs.haskellPackages.ghcWithPackages (pkgs: with pkgs; [
+        
+        # Create a custom Haskell package set to ensure consistent versions
+        haskellPackages = pkgs.haskell.packages.ghc984;        
+        # Use the custom package set for GHC and dependencies
+        ghcWithHasktorch = haskellPackages.ghcWithPackages (pkgs: with pkgs; [
           hasktorch
           libtorch-ffi
           safe-exceptions
@@ -26,19 +30,32 @@
           binary
           bytestring
           containers
-          haskell-language-server
         ]);
+        
+        # Create a separate HLS derivation using the same package set
+        hls = haskellPackages.haskell-language-server;
+        
       in {
-        defaultPackage = pkgs.haskellPackages.callCabal2nix "hasktorch-skeleton" ./. {};
+        defaultPackage = haskellPackages.callCabal2nix "hech-interp" ./. {};
         devShell = with pkgs; mkShell {
           buildInputs = [
             ghcWithHasktorch
+            hls  # Use the HLS from the same package set
             cabal-install
             stack
-            # ihaskell
+            ihaskell
+            
+            # Add build tools
+            gcc
+            gnumake
+            pkg-config
+            git
           ];
           shellHook = ''
             source ${git}/share/bash-completion/completions/git-prompt.sh
+            # Ensure HLS uses the GHC from this environment
+            export HIE_BIOS_GHC="${ghcWithHasktorch}/bin/ghc"
+            export HIE_BIOS_GHC_ARGS=""
           '';
         };
       });

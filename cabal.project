@@ -1,2 +1,5 @@
 packages:
-    *.cabal
+    ./
+
+-- This is needed for hasktorch
+allow-newer: all
