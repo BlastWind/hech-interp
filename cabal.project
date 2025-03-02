@@ -1,5 +1,4 @@
 packages:
     ./
 
--- This is needed for hasktorch
 allow-newer: all
