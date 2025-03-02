@@ -51,14 +51,8 @@ traceTensor ten = trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll
 -- Right now we just return the attention layer cached
 -- Eventually we want to return the activations of all layers.
 -- type Cache device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
--- type Cache device dtype batchSize numHeads inputSeqLen = Map '["attention" :-> Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]]
--- Example
--- foo :: Map '["x" :-> Int, "z" :-> Bool, "w" :-> Int]
--- foo = Ext (Var :: (Var "x")) 2
---     $ Ext (Var :: (Var "z")) True
---     $ Ext (Var :: (Var "w")) 5
---     $ Empty
 
+-- First attempt
 -- type family Cache k device dtype batchSize numHeads inputSeqLen :: Type where
 --   Cache "attention" device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
 --   Cache _ _ _ _ _ _ = TypeError ('Text "Cache key not found")
