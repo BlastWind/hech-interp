@@ -56,6 +56,8 @@ library
   import: base
   exposed-modules:
     GPT2
+    GPT2.Loader
+    GPT2.Model
     SafeTensors
   hs-source-dirs: src
   ghc-options:
