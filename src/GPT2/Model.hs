@@ -41,6 +41,7 @@ import Torch.Typed.NN.Sparse
 import Torch.Typed.Parameter
 import Torch.Typed.Tensor
 import Prelude hiding (cos, exp, sin)
+import Data.Kind
 
 residual f g x = f x >>= (\x' -> g (x `add` x'))
 
@@ -49,7 +50,33 @@ traceTensor ten = trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll
 -- TODO type level map to Tensors depending on type of index.
 -- Right now we just return the attention layer cached
 -- Eventually we want to return the activations of all layers.
-type Cache device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
+-- type Cache device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
+-- type Cache device dtype batchSize numHeads inputSeqLen = Map '["attention" :-> Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]]
+-- Example
+-- foo :: Map '["x" :-> Int, "z" :-> Bool, "w" :-> Int]
+-- foo = Ext (Var :: (Var "x")) 2
+--     $ Ext (Var :: (Var "z")) True
+--     $ Ext (Var :: (Var "w")) 5
+--     $ Empty
+
+-- type family Cache k device dtype batchSize numHeads inputSeqLen :: Type where
+--   Cache "attention" device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
+--   Cache _ _ _ _ _ _ = TypeError ('Text "Cache key not found")
+
+-- Key-value pair type
+data KV (k :: Symbol) (v :: Type)
+
+-- Type-level list to represent the cache
+type Cache device dtype batchSize numHeads inputSeqLen =
+            '[ KV "attention" (Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen])
+            --  , KV "embedding" (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]) -- TODO guessing
+             ]
+
+-- Type family to look up a value in the Cache
+type family Lookup (key :: Symbol) (cache :: [Type]) :: Type where
+  Lookup key '[] = TypeError ('Text "Key not found in cache: " ':<>: 'Text key)
+  Lookup key (KV key v ': _) = v
+  Lookup key (_ ': rest) = Lookup key rest
 
 geluApproximate ::
   forall shape dtype device.
@@ -316,7 +343,7 @@ transformerLayer TransformerLayer {..} attentionMask query key value =
       value' = forward transformerLayer_ln value
       f query' = multiheadAttention transformerLayer_mha attentionMask query' key' value'
    in -- _ <- print . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll . toDynamic $ fst r
-      do -- TODO return cache here too?
+      do
         (result, cache) <- f (forward transformerLayer_ln query)
         let result' = query `add` result
         foo <- transformerMLP transformerLayer_mlp result'
