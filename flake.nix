@@ -13,14 +13,22 @@
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
+          # needed for building tiktoken-1.0.3, which this nixpkgs url doesn't support
+          config.allowBroken = true;
           config.cudaSupport = system == "x86_64-linux";
           config.ihaskell.packages = pkgs: with pkgs; [
             hasktorch
           ];
         };
         
-        # Create a custom Haskell package set to ensure consistent versions
-        haskellPackages = pkgs.haskell.packages.ghc984;        
+        haskellPackages = pkgs.haskell.packages.ghc984.override {
+          overrides = self: super: {
+            # Override megaparsec to use version 9.6.1 instead of 9.7.0
+            # so that tiktoken-1.0.3 builds
+            megaparsec = self.callHackage "megaparsec" "9.6.1" {};
+          };
+        };
+        
         # Use the custom package set for GHC and dependencies
         ghcWithHasktorch = haskellPackages.ghcWithPackages (pkgs: with pkgs; [
           hasktorch

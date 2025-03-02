@@ -41,6 +41,7 @@ common base
     , transformers
     , constraints
     , tiktoken
+    , megaparsec < 9.7
 
 common binary-base
   import: base
