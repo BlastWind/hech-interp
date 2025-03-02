@@ -43,34 +43,28 @@ import Torch.Typed.Tensor
 import Prelude hiding (cos, exp, sin)
 import Data.Kind
 
+import Data.Constraint.Extras.TH (deriveArgDict)
+import Data.Dependent.Map (DMap, fromList, singleton, union, unionWithKey)
+import Data.Dependent.Sum ((==>))
+import Data.Functor.Identity (Identity(..))
+-- TODO not sure if we actually need this
+-- import Data.GADT.Compare.TH (deriveGCompare, deriveGEq)
+-- import Data.GADT.Show.TH (deriveGShow)
+
 residual f g x = f x >>= (\x' -> g (x `add` x'))
 
 traceTensor ten = trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic ten) ten
 
--- TODO type level map to Tensors depending on type of index.
--- Right now we just return the attention layer cached
--- Eventually we want to return the activations of all layers.
--- type Cache device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
+data CacheTag device dtype batchSize numHeads inputSeqLen a where
+  Attention :: CacheTag device dtype batchSize numHeads inputSeqLen (Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen])
 
--- First attempt
--- type family Cache k device dtype batchSize numHeads inputSeqLen :: Type where
---   Cache "attention" device dtype batchSize numHeads inputSeqLen = Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen]
---   Cache _ _ _ _ _ _ = TypeError ('Text "Cache key not found")
+-- TODO not sure if we actually need this it's in the example
+-- deriveGEq ''CacheTag
+-- deriveGCompare ''CacheTag
+-- deriveGShow ''CacheTag
+-- deriveArgDict ''CacheTag
 
--- Key-value pair type
-data KV (k :: Symbol) (v :: Type)
-
--- Type-level list to represent the cache
-type Cache device dtype batchSize numHeads inputSeqLen =
-            '[ KV "attention" (Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen])
-            --  , KV "embedding" (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]) -- TODO guessing
-             ]
-
--- Type family to look up a value in the Cache
-type family Lookup (key :: Symbol) (cache :: [Type]) :: Type where
-  Lookup key '[] = TypeError ('Text "Key not found in cache: " ':<>: 'Text key)
-  Lookup key (KV key v ': _) = v
-  Lookup key (_ ': rest) = Lookup key rest
+type Cache device dtype batchSize numHeads inputSeqLen = DMap (CacheTag device dtype batchSize numHeads inputSeqLen) Identity
 
 geluApproximate ::
   forall shape dtype device.
@@ -146,7 +140,10 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value = do
         softmax @3
           . _maskAttention
           $ _attentionWeights
-  return $ (_attention weights, weights)
+  let updatedCache = singleton Attention (Identity weights)
+  -- TODO when we want to start updating the cache we can do
+  -- let updatedCache =  prev `union` fromList [Attention ==> weights]
+  return $ (_attention weights, updatedCache)
   where
     -- this is "pattern" 
     _attentionWeights =

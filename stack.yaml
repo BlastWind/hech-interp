@@ -10,7 +10,7 @@ packages:
 system-ghc: true
 
 nix:
-  enable: true
+  enable: false
 
 extra-deps:
   - streaming-commons-0.2.2.6

@@ -39,6 +39,10 @@ common base
     , libtorch-ffi-helper
     , safe-exceptions
     , transformers
+    , dependent-map
+    , constraints-extras
+    , dependent-sum
+
 
 common binary-base
   import: base
