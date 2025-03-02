@@ -140,10 +140,7 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value = do
         softmax @3
           . _maskAttention
           $ _attentionWeights
-  let updatedCache = singleton Attention (Identity weights)
-  -- TODO when we want to start updating the cache we can do
-  -- let updatedCache =  prev `union` fromList [Attention ==> weights]
-  (_attention weights, updatedCache)
+  return $ (_attention weights, weights)
   where
     -- this is "pattern"
     _attentionWeights =
