@@ -65,6 +65,10 @@
             # Ensure HLS uses the GHC from this environment
             export HIE_BIOS_GHC="${ghcWithHasktorch}/bin/ghc"
             export HIE_BIOS_GHC_ARGS=""
+            
+            # Use unwrapped compiler to avoid --target warnings
+            export NIX_CFLAGS_COMPILE_FOR_TARGET=""
+            export NIX_CFLAGS_LINK_FOR_TARGET=""
           '';
         };
       });
