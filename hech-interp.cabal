@@ -39,6 +39,9 @@ common base
     , libtorch-ffi-helper
     , safe-exceptions
     , transformers
+    , dependent-map
+    , constraints-extras
+    , dependent-sum
     , constraints
     , tiktoken
     , megaparsec < 9.7
