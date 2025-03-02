@@ -39,6 +39,8 @@ common base
     , libtorch-ffi-helper
     , safe-exceptions
     , transformers
+    , constraints
+    , tiktoken
 
 common binary-base
   import: base
