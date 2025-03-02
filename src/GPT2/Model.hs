@@ -134,7 +134,7 @@ multiheadAttention ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | attention and attention averaged over heads
-  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
+  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
 multiheadAttention MultiheadAttention {..} attentionMask query key value = do
   let weights :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen] =
         softmax @3
@@ -143,9 +143,9 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value = do
   let updatedCache = singleton Attention (Identity weights)
   -- TODO when we want to start updating the cache we can do
   -- let updatedCache =  prev `union` fromList [Attention ==> weights]
-  return $ (_attention weights, updatedCache)
+  (_attention weights, updatedCache)
   where
-    -- this is "pattern" 
+    -- this is "pattern"
     _attentionWeights =
       let scaling = Prelude.sqrt . fromIntegral $ natValI @headDim :: Double
           q = reshape' . forward mhaQInProj $ query
@@ -158,7 +158,7 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value = do
         Just am -> attentionWeights `add` unsqueeze @1 am
     -- this is "result"
     _attention attentionWeights =
-          -- this is "v"
+      -- this is "v"
       let v = reshape' . forward mhaVInProj $ value
           -- this is "z"
           attention = transpose @1 @2 $ matmul attentionWeights v
@@ -236,10 +236,9 @@ transformerMLP ::
   -- | MLP model ADT for transformer
   TransformerMLP numEmbeds ffnDim dtype device ->
   Tensor device dtype '[maxSeqLen, batchSize, numEmbeds] -> -- input
-  IO (Tensor device dtype '[maxSeqLen, batchSize, numEmbeds]) -- output
+  Tensor device dtype '[maxSeqLen, batchSize, numEmbeds] -- output
 transformerMLP TransformerMLP {..} x =
-  return
-    . (`add` x)
+  (`add` x)
     . forward linear1
     . (`geluApproximate` "tanh")
     . forward linear0
@@ -328,17 +327,16 @@ transformerLayer ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | transformer layer output representation
-  IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
+  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen)
 transformerLayer TransformerLayer {..} attentionMask query key value =
   let key' = forward transformerLayer_ln key
       value' = forward transformerLayer_ln value
       f query' = multiheadAttention transformerLayer_mha attentionMask query' key' value'
    in -- _ <- print . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll . toDynamic $ fst r
       do
-        (result, cache) <- f (forward transformerLayer_ln query)
+        let (result, cache) = f (forward transformerLayer_ln query)
         let result' = query `add` result
-        foo <- transformerMLP transformerLayer_mlp result'
-        return (foo, cache)
+        (transformerMLP transformerLayer_mlp result', cache)
 
 instance
   ( All KnownNat '[numEmbeds, numEmbeds, numEmbeds, numHeads, ffnDim],
@@ -428,7 +426,7 @@ deriving instance
 
 instance
   ( layers
-      ~ ( HReplicateR
+      ~ HReplicateR
             numAttnLayers
             ( TransformerLayer
                 numEmbeds
@@ -436,8 +434,7 @@ instance
                 ffnDim
                 dtype
                 device
-            )
-        ),
+            ),
     Parameterized
       ( HList
           layers
@@ -459,12 +456,13 @@ instance
   ) =>
   Parameterized (GPT2 numAttnLayers numHeads ffnDim paddingIdx maxSeqLen vocabSize numEmbeds dtype device)
 
-data
+newtype
   FoldLayers
     (batchSize :: Nat)
     (inputSeqLen :: Nat)
     (dtype :: D.DType)
-    (device :: (D.DeviceType, Nat)) = FoldLayers
+    (device :: (D.DeviceType, Nat))
+  = FoldLayers
   { -- | optional attention mask
     flAttentionMask :: Maybe (Tensor device dtype '[batchSize, inputSeqLen, inputSeqLen])
   }
@@ -486,13 +484,12 @@ instance
   Apply'
     (FoldLayers batchSize inputSeqLen dtype device)
     ( TransformerLayer numEmbeds numHeads ffnDim dtype device,
-      IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
+      Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]
     )
-    (IO (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], Cache device dtype batchSize numHeads inputSeqLen))
+    (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
   where
-  apply' FoldLayers {..} (layer, mx) = do
-    x <- mx
-    transformerLayer layer flAttentionMask x x x
+  apply' FoldLayers {..} (layer, x) = do
+    let (res, cache) = transformerLayer layer flAttentionMask x x x in res
 
 transformerLM ::
   forall
@@ -511,8 +508,7 @@ transformerLM ::
     IsSuffixOf '[numEmbeds] '[batchSize, inputSeqLen, numEmbeds],
     paddingIdx + 1 <= vocabSize,
     1 <= inputSeqLen,
-    HFoldrM
-      IO
+    HFoldr
       (FoldLayers batchSize inputSeqLen dtype device)
       (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
       (HReplicateR numAttnLayers (TransformerLayer numEmbeds numHeads ffnDim dtype device))
@@ -525,7 +521,7 @@ transformerLM ::
   ) =>
   GPT2 numAttnLayers numHeads ffnDim paddingIdx maxSeqLen vocabSize numEmbeds dtype device ->
   Tensor device 'D.Int64 '[batchSize, inputSeqLen] ->
-  IO (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
+  Tensor device dtype '[batchSize, inputSeqLen, vocabSize]
 transformerLM GPT2 {..} xTokens = do
   let x = embed tEmbedding xTokens
       positions =
@@ -542,28 +538,28 @@ transformerLM GPT2 {..} xTokens = do
           . triu 1
           $ ones @'[inputSeqLen, inputSeqLen] @D.Int8 @device
       attentionMask' =
-        pure . maskedFill attentionMask (-1 / 0 :: Double) $
+        pure . maskedFill attentionMask (- (1 / 0) :: Double) $
           zeros @'[batchSize, inputSeqLen, inputSeqLen] @dtype @device
   -- _ <- print $ shape x
   -- _ <- print (T.select 0 0 . T.squeezeAll $ toDynamic x)
-  y <- hfoldrM (FoldLayers attentionMask') x' tLayers
-  return
-    -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
-    -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
-    . forward tProj
-    $ forward tFinalLN y
+
+  -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
+  -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
+  forward tProj $ forward tFinalLN (hfoldr (FoldLayers attentionMask') x' tLayers)
 
 instance
   ( All KnownNat '[paddingIdx, numEmbeds, inputSeqLen, batchSize, inputSeqLen],
     IsSuffixOf '[numEmbeds] '[batchSize, inputSeqLen, numEmbeds],
     paddingIdx + 1 <= vocabSize,
     1 <= inputSeqLen,
-    HFoldrM
-      IO
+    HFoldr
       (FoldLayers batchSize inputSeqLen dtype device)
-      (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
-      (HReplicateR numAttnLayers (TransformerLayer numEmbeds numHeads ffnDim dtype device))
-      (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]),
+      (Tensor device dtype [batchSize, inputSeqLen, numEmbeds])
+      ( HReplicateR
+          numAttnLayers
+          (TransformerLayer numEmbeds numHeads ffnDim dtype device)
+      )
+      (Tensor device dtype [batchSize, inputSeqLen, numEmbeds]),
     BasicArithmeticDTypeIsValid device dtype,
     ComparisonDTypeIsValid device dtype,
     ComparisonDTypeIsValid device 'D.Int64,
@@ -572,8 +568,8 @@ instance
   ) =>
   HasForward (GPT2 numAttnLayers numHeads ffnDim paddingIdx inputSeqLen vocabSize numEmbeds dtype device) (Tensor device 'D.Int64 '[batchSize, inputSeqLen]) (Tensor device dtype '[batchSize, inputSeqLen, vocabSize])
   where
-  forward model input = unsafePerformIO $ transformerLM model input
-  forwardStoch model input = transformerLM model input
+  forwardStoch model input = return $ transformerLM model input
+  forward = transformerLM
 
 sinusoidal ::
   forall vocabSize numEmbeds device.
@@ -593,9 +589,10 @@ sinusoidal =
           $ natValI @(vocabSize - 1)
       scalingFactors =
         exp
-          . mulScalar (-log (10000 :: Double) / (fromInteger . natVal $ Proxy @(Div numEmbeds 2)))
+          . mulScalar (- (log (10000 :: Double)
+           / (fromInteger . natVal $ Proxy @(Div numEmbeds 2))))
           . linspace @(Div numEmbeds 2) (0 :: Int)
-          $ natValI @((Div numEmbeds 2) - 1)
+          $ natValI @(Div numEmbeds 2 - 1)
       radians = mul positions scalingFactors
       weights = stack @2 (sin radians :. cos radians :. HNil)
    in reshape weights

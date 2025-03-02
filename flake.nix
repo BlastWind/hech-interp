@@ -50,6 +50,7 @@
             gnumake
             pkg-config
             git
+            pcre
           ];
           shellHook = ''
             source ${git}/share/bash-completion/completions/git-prompt.sh

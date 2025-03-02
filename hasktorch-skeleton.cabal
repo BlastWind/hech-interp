@@ -42,7 +42,8 @@ common base
     , dependent-map
     , constraints-extras
     , dependent-sum
-
+    , constraints
+    , tiktoken
 
 common binary-base
   import: base
