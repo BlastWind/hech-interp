@@ -1,5 +1,5 @@
 cabal-version:       2.2
-name:                hasktorch-skeleton
+name:                hech-interp
 version:             0.0.0.0
 synopsis:            See README for more info
 description:         See README for more info
@@ -44,17 +44,17 @@ common base
     , dependent-sum
     , constraints
     , tiktoken
+    , megaparsec < 9.7
 
 common binary-base
   import: base
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends: 
-    hasktorch-skeleton
+    hech-interp
 
 library
   import: base
   exposed-modules:
-    HasktorchSkeleton
     GPT2
     SafeTensors
   hs-source-dirs: src

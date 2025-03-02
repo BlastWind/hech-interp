@@ -1,4 +1,4 @@
-# Hasktorch Skeleton
+# Hech Interp
 Templated from [hasktorch-skeleton](https://github.com/hasktorch/hasktorch-skeleton) and [haskell-template](https://github.com/srid/haskell-template?tab=readme-ov-file).
 
 Note, `ghc 9.8.4` might not be available in a HLS release yet (you can check this in your `ghcup tui`). But it is available on HLS master as of Mar 2025. To use this, just
