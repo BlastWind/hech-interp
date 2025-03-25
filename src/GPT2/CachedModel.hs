@@ -7,6 +7,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -31,6 +32,7 @@ import Data.Proxy
 import Debug.Trace
 import GHC.Generics
 import GHC.TypeLits
+import GPT2.HListExtensions
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Torch as T
 import qualified Torch.DType as D
@@ -57,10 +59,6 @@ import Prelude hiding (cos, exp, sin)
 residual f g x = f x >>= (\x' -> g (x `add` x'))
 
 traceTensor ten = trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic ten) ten
-
--- | No constraints on result and argument types
-class ApplyAB f a b where
-  applyAB :: f -> a -> b
 
 data
   ActivationCache
@@ -134,6 +132,19 @@ data
     MultiheadAttention numEmbeds numHeads dtype device
   deriving (Show, Generic, Parameterized)
 
+data
+  MultiheadAttentionActivationCache
+    (numEmbeds :: Nat)
+    (numHeads :: Nat)
+    (dtype :: D.DType)
+    (device :: (D.DeviceType, Nat))
+  where
+  MultiheadAttentionActivationCache ::
+    { result, pattern, v, z
+    } ->
+    MultiheadAttention numEmbeds numHeads dtype device
+  deriving (Show, Generic, Parameterized)
+
 multiheadAttention ::
   forall numEmbeds numHeads inputSeqLen batchSize headDim dtype device.
   ( 1 <= numHeads,
@@ -158,7 +169,7 @@ multiheadAttention ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | attention and attention averaged over heads
-  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], GPT2ActivationMap device batchSize inputSeqLen)
+  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], MultiheadAttentionActivationCache _ _ _)
 multiheadAttention MultiheadAttention {..} attentionMask query key value = do
   let weights :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen] =
         softmax @3
@@ -322,6 +333,21 @@ data
     TransformerLayer numEmbeds numHeads ffnDim dtype device
   deriving (Show, Generic, Parameterized)
 
+data
+  TransformerLayerActivationCache
+    (device :: (D.DeviceType, Nat))
+    (dtype :: D.DType)
+    (batchSize :: Nat)
+    (inputSeqLen :: Nat)
+    (numEmbeds :: Nat)
+  where
+  TransformerLayerActivationCache :: forall device dtype batchSize inputSeqLen numEmbeds.
+    { transformerLayerKeyActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds],
+      transformerLayerQueryActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds],
+      transformerLayerValueActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]
+    } ->
+    TransformerLayerActivationCache device dtype batchSize inputSeqLen numEmbeds
+
 transformerLayer ::
   forall (numHeads :: Nat) (ffnDim :: Nat) (numEmbeds :: Nat) (headDim :: Nat) (inputSeqLen :: Nat) (batchSize :: Nat) dtype device.
   ( 1 <= numHeads,
@@ -348,7 +374,7 @@ transformerLayer ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | transformer layer output representation
-  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], GPT2ActivationMap device batchSize inputSeqLen)
+  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], TransformerLayerActivationCache device dtype batchSize inputSeqLen numEmbeds)
 transformerLayer TransformerLayer {..} attentionMask query key value =
   let key' = forward transformerLayer_ln key
       value' = forward transformerLayer_ln value
@@ -488,18 +514,6 @@ newtype
     flAttentionMask :: Maybe (Tensor device dtype '[batchSize, inputSeqLen, inputSeqLen])
   }
 
-class HScanr f z ls rs where
-    hScanr :: f -> z -> HList ls -> HList rs
-
-instance lz ~ '[z] => HScanr f z '[] lz where
-    hScanr _ z _ = HCons (z, HNil)
-
-instance (ApplyAB f (x,r) s, HScanr f z xs (r ': rs),
-          srrs ~ (s ': r ': rs)) => HScanr f z (x ': xs) srrs where
-    hScanr f z (HCons (x, xs)) =
-        case hScanr f z xs :: HList (r ': rs) of
-            HCons (r, rs) -> HCons (applyAB f (x,r) :: s, HCons (r, rs))
-
 instance
   ( 1 <= numHeads,
     numEmbeds ~ (headDim * numHeads),
@@ -541,6 +555,7 @@ transformerLM ::
     IsSuffixOf '[numEmbeds] '[batchSize, inputSeqLen, numEmbeds],
     paddingIdx + 1 <= vocabSize,
     1 <= inputSeqLen,
+    HLast (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])) (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]),
     HScanr
       (FoldLayers batchSize inputSeqLen dtype device)
       (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
@@ -578,28 +593,23 @@ transformerLM GPT2 {..} xTokens = do
 
   -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
   -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
-  
-  -- TODO: Use Hackage's HList, which comes with functions interacting with HLists
-  -- TODO: `hLast` on `intermediateLayerOutputs` to get the last layer output, 
-  -- and then pipe that through.
-  let 
-    intermediateLayerOutputs :: HList (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]))
-    intermediateLayerOutputs = hScanr (FoldLayers attentionMask') x' tLayers 
-  (forward tProj $ forward tFinalLN (hfoldr (FoldLayers attentionMask') x' tLayers), empty)
+
+  let intermediateLayerOutputs :: HList (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]))
+      intermediateLayerOutputs = hScanr (FoldLayers attentionMask') x' tLayers
+      l = hLast intermediateLayerOutputs
+  (forward tProj $ forward tFinalLN l, empty)
 
 instance
   ( All KnownNat '[paddingIdx, numEmbeds, inputSeqLen, batchSize, inputSeqLen],
     IsSuffixOf '[numEmbeds] '[batchSize, inputSeqLen, numEmbeds],
     paddingIdx + 1 <= vocabSize,
     1 <= inputSeqLen,
-    HFoldr
+    HLast (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])) (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]),
+    HScanr
       (FoldLayers batchSize inputSeqLen dtype device)
-      (Tensor device dtype [batchSize, inputSeqLen, numEmbeds])
-      ( HReplicateR
-          numAttnLayers
-          (TransformerLayer numEmbeds numHeads ffnDim dtype device)
-      )
-      (Tensor device dtype [batchSize, inputSeqLen, numEmbeds]),
+      (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])
+      (HReplicateR numAttnLayers (TransformerLayer numEmbeds numHeads ffnDim dtype device))
+      (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds])),
     BasicArithmeticDTypeIsValid device dtype,
     ComparisonDTypeIsValid device dtype,
     ComparisonDTypeIsValid device 'D.Int64,
