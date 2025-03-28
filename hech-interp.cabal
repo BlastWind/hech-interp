@@ -45,6 +45,7 @@ common base
     , constraints
     , tiktoken
     , megaparsec < 9.7
+    , vector-sized
 
 
 common binary-base
