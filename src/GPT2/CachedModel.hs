@@ -220,17 +220,13 @@ multiheadAttention ::
   MultiheadAttention dmodel nhead dtype device ->
   -- | optional attention mask
   Maybe (Tensor device dtype '[batchSize, seqLen, seqLen]) ->
-  -- | query representation
-  Tensor device dtype '[batchSize, seqLen, dmodel] ->
-  -- | key representation
-  Tensor device dtype '[batchSize, seqLen, dmodel] ->
-  -- | value representation
+  -- | input
   Tensor device dtype '[batchSize, seqLen, dmodel] ->
   -- | attention and attention averaged over heads, the `attn_out`.
   ( Tensor device dtype '[batchSize, seqLen, dmodel],
     DMap (AttentionCache device dtype batchSize seqLen dmodel dhead nhead) Identity
   )
-multiheadAttention MultiheadAttention {..} attentionMask query key value =
+multiheadAttention MultiheadAttention {..} attentionMask inp =
   ( attn_out,
     fromList
       [ Q ==> reshape @'[batchSize, seqLen, nhead, dhead] q,
@@ -245,9 +241,9 @@ multiheadAttention MultiheadAttention {..} attentionMask query key value =
   where
     -- '[batchSize, nhead, seqLen, dhead]
     scaling = Prelude.sqrt . fromIntegral $ natValI @dhead :: Double
-    q = reshape' . forward mhaQInProj $ query
-    k = reshape' . forward mhaKInProj $ key
-    v = reshape' . forward mhaVInProj $ value
+    q = reshape' . forward mhaQInProj $ inp
+    k = reshape' . forward mhaKInProj $ inp
+    v = reshape' . forward mhaVInProj $ inp
     _maskAttention attentionWeights =
       case attentionMask of
         Nothing -> attentionWeights
@@ -423,23 +419,15 @@ transformerLayer ::
   TransformerLayer dmodel nhead ffnDim dtype device ->
   -- | optional attention mask
   Maybe (Tensor device dtype '[batchSize, seqLen, seqLen]) ->
-  -- | query representation
-  Tensor device dtype '[batchSize, seqLen, dmodel] ->
-  -- | key representation
-  Tensor device dtype '[batchSize, seqLen, dmodel] ->
-  -- | value representation
+  -- | input
   Tensor device dtype '[batchSize, seqLen, dmodel] ->
   -- | transformer layer output representation
   (Tensor device dtype '[batchSize, seqLen, dmodel], DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity)
-transformerLayer TransformerLayer {..} attentionMask query key value =
-  let key' = forward transformerLayer_ln key
-      value' = forward transformerLayer_ln value
-      f query' = multiheadAttention transformerLayer_mha attentionMask query' key' value'
+transformerLayer TransformerLayer {..} attentionMask inp =
+  let inpNorm = forward transformerLayer_ln inp
+      (attnOut, attnCache) = multiheadAttention transformerLayer_mha attentionMask inpNorm
    in -- _ <- print . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll . toDynamic $ fst r
-      do
-        let (result, cache) = f (forward transformerLayer_ln query)
-        let result' = query `add` result
-        (transformerMLP transformerLayer_mlp result', _)
+      (transformerMLP transformerLayer_mlp (inp `add` attnOut), _)
 
 instance
   ( All KnownNat '[dmodel, dmodel, dmodel, nhead, ffnDim],
@@ -592,7 +580,7 @@ instance
     (Tensor device dtype '[batchSize, seqLen, dmodel])
   where
   applyAB FoldLayers {..} (layer, x) = do
-    let (res, cache) = transformerLayer layer flAttentionMask x x x in res
+    let (res, cache) = transformerLayer layer flAttentionMask x in res
 
 transformerLM ::
   forall
