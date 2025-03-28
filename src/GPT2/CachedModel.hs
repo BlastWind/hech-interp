@@ -140,10 +140,16 @@ data
     (device :: (D.DeviceType, Nat))
   where
   MultiheadAttentionActivationCache ::
-    { result, pattern, v, z
+    { -- | The dot product of q, k
+      attn_scores :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen],
+      -- | Softmaxed and masked "attn_scores"
+      pattern :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen],
+      -- | The value activation weighed by "pattern"
+      z :: Tensor device dtype '[batchSize, inputSeqLen, numHeads, headDim],
+      -- | z multiplied by the out-projection
+      result :: Tensor device dtype '[batchSize, inputSeqLen, numHeads, numEmbeds]
     } ->
-    MultiheadAttention numEmbeds numHeads dtype device
-  deriving (Show, Generic, Parameterized)
+    MultiheadAttentionActivationCache numEmbeds numHeads dtype device
 
 multiheadAttention ::
   forall numEmbeds numHeads inputSeqLen batchSize headDim dtype device.
@@ -169,32 +175,31 @@ multiheadAttention ::
   -- | value representation
   Tensor device dtype '[batchSize, inputSeqLen, numEmbeds] ->
   -- | attention and attention averaged over heads
-  (Tensor device dtype '[batchSize, inputSeqLen, numEmbeds], MultiheadAttentionActivationCache _ _ _)
-multiheadAttention MultiheadAttention {..} attentionMask query key value = do
-  let weights :: Tensor device dtype '[batchSize, numHeads, inputSeqLen, inputSeqLen] =
-        softmax @3
-          . _maskAttention
-          $ _attentionWeights
-   in (_attention weights, empty)
+  ( Tensor device dtype '[batchSize, inputSeqLen, numEmbeds],
+    MultiheadAttentionActivationCache numEmbeds numHeads dtype device
+  )
+multiheadAttention MultiheadAttention {..} attentionMask query key value = (result, MultiheadAttentionActivationCache attn_scores pattern z result'')
   where
-    -- this is "pattern"
-    _attentionWeights =
-      let scaling = Prelude.sqrt . fromIntegral $ natValI @headDim :: Double
-          q = reshape' . forward mhaQInProj $ query
-          k = reshape' . forward mhaKInProj $ key
-          weights = divScalar scaling $ matmul q (transpose @2 @3 k)
-       in weights
+    scaling = Prelude.sqrt . fromIntegral $ natValI @headDim :: Double
+    q = reshape' . forward mhaQInProj $ query
+    k = reshape' . forward mhaKInProj $ key
+    v = reshape' . forward mhaVInProj $ value
     _maskAttention attentionWeights =
       case attentionMask of
         Nothing -> attentionWeights
         Just am -> attentionWeights `add` unsqueeze @1 am
-    -- this is "result"
-    _attention attentionWeights =
-      -- this is "v"
-      let v = reshape' . forward mhaVInProj $ value
-          -- this is "z"
-          attention = transpose @1 @2 $ matmul attentionWeights v
-       in forward mhaOutProj . reshape @'[batchSize, inputSeqLen, numEmbeds] $ attention
+    attn_scores = _maskAttention $ divScalar scaling $ matmul q (transpose @2 @3 k) -- dot product, scaled (by sqrt, not softmax)
+    pattern = softmax @3 attn_scores
+    z = transpose @1 @2 $ matmul pattern v
+    -- z' is z with the numHeads and inputSeqLen swapped so that `matmul z' wo` is broadcasted correctly.
+    z' = reshape @'[batchSize, numHeads, inputSeqLen, headDim] z
+    -- KEY: While `mhaOutProj` is efficiently represented with dims [numEmbeds, numEmbeds],
+    -- its meaning is clearer when seen as [numHeads, headDim, numEmbeds]. These are equiv because numEmbeds ~ numHeads * headDim
+    -- We need to reshape to the meaningful representation in order to calculate result'', which is the meaningful cache.
+    wo = reshape @'[numHeads, headDim, numEmbeds] $ toDependent $ weight mhaOutProj
+    result' = matmul z' wo
+    result'' = reshape @'[batchSize, inputSeqLen, numHeads, numEmbeds] result'
+    result = forward mhaOutProj . reshape @'[batchSize, inputSeqLen, numEmbeds] $ z
     reshape' ::
       forall inputSeqLen'.
       (KnownNat inputSeqLen') =>
@@ -341,7 +346,8 @@ data
     (inputSeqLen :: Nat)
     (numEmbeds :: Nat)
   where
-  TransformerLayerActivationCache :: forall device dtype batchSize inputSeqLen numEmbeds.
+  TransformerLayerActivationCache ::
+    forall device dtype batchSize inputSeqLen numEmbeds.
     { transformerLayerKeyActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds],
       transformerLayerQueryActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds],
       transformerLayerValueActivation :: Tensor device dtype '[batchSize, inputSeqLen, numEmbeds]
