@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -41,6 +42,7 @@ import qualified Torch.DType as D
 import qualified Torch.Device as D
 import Torch.HList
 import Torch.Internal.Cast (cast2)
+import qualified Torch.Internal.Cast as ATen
 import qualified Torch.Internal.Managed.Native as ATen.Managed
 import Torch.NN (HasForward (..))
 import qualified Torch.NN as A
@@ -79,6 +81,10 @@ data
   Blocks :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers [V.Vector nLayers (DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity)]
   LnFinal :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers (DMap (LayerNormCache device dtype batchSize seqLen dmodel) Identity)
 
+deriving instance GEq (ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers)
+
+deriving instance GCompare (ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers)
+
 data
   BlockCache
     (device :: (D.DeviceType, Nat))
@@ -99,6 +105,10 @@ data
   MLP :: BlockCache device dtype batchSize seqLen dmodel dhead nhead (DMap (MLPCache device dtype batchSize seqLen dmodel) Identity)
   MLPOut :: BlockCache device dtype batchSize seqLen dmodel dhead nhead (Tensor device dtype '[batchSize, seqLen, dmodel])
   ResidPost :: BlockCache device dtype batchSize seqLen dmodel dhead nhead (Tensor device dtype '[batchSize, seqLen, dmodel])
+
+deriving instance GEq (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+
+deriving instance GCompare (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
 
 data
   AttentionCache
@@ -132,8 +142,13 @@ data
     (dmodel :: Nat)
     a
   where
+  -- | Scale is the std of the input (residual stream)
   Scale :: LayerNormCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, 1])
   Normalized :: LayerNormCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, dmodel])
+
+deriving instance GEq (LayerNormCache device dtype batchSize seqLen dmodel)
+
+deriving instance GCompare (LayerNormCache device dtype batchSize seqLen dmodel)
 
 data
   MLPCache
@@ -141,11 +156,18 @@ data
     (dtype :: D.DType)
     (batchSize :: Nat)
     (seqLen :: Nat)
-    (dmodel :: Nat)
+    (ffnDim :: Nat)
     a
   where
-  MLPpre :: MLPCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, 4 * dmodel])
-  MLPpost :: MLPCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, 4 * dmodel])
+  -- Right before activation function
+  MLPpre :: MLPCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, ffnDim])
+  -- Right after activation function
+  MLPpost :: MLPCache device dtype batchSize seqLen dmodel (Tensor device dtype '[batchSize, seqLen, ffnDim])
+
+deriving instance GEq (MLPCache device dtype batchSize seqLen dmodel)
+
+deriving instance GCompare (MLPCache device dtype batchSize seqLen dmodel)
+
 
 -- TODO not sure if we actually need this it's in the example
 -- deriveGEq ''CacheTag
@@ -324,24 +346,52 @@ data
     TransformerMLP dmodel ffnDim dtype device
   deriving (Show, Generic, Parameterized)
 
+-- | While most functions directly correspond to its cache map,
+-- unfortunately, `transformerMLP` needs to return more than a `MLPCache` because
+-- `transformerMLP` is doing a bit too much, it calculates `ln2` as well.
+-- I can't modify `MLPCache` because that adheres to the TransformerLens API.
+data
+  TransformerMLPActivation
+    (device :: (D.DeviceType, Nat))
+    (dtype :: D.DType)
+    (batchSize :: Nat)
+    (seqLen :: Nat)
+    (dmodel :: Nat)
+  = TransformerMLPActivation
+  { -- | ln2.normalized
+    mlpLn :: DMap (LayerNormCache device dtype batchSize seqLen dmodel) Identity,
+    mlpCache :: DMap (MLPCache device dtype batchSize seqLen dmodel) Identity,
+    mlpOut :: Tensor device dtype '[batchSize, seqLen, dmodel],
+    -- | resid_post
+    mlpResult :: Tensor device dtype '[batchSize, seqLen, dmodel]
+  }
+
 transformerMLP ::
   forall dmodel ffnDim maxSeqLen batchSize dtype device.
   ( BasicArithmeticDTypeIsValid device dtype,
     StandardFloatingPointDTypeValidation device dtype,
-    KnownNat dmodel,
+    All KnownNat '[batchSize, maxSeqLen, dmodel],
     GeluDTypeIsValid device dtype,
-    IsSuffixOf '[dmodel] '[maxSeqLen, batchSize, dmodel]
+    IsSuffixOf '[dmodel] '[batchSize, maxSeqLen, dmodel],
+    SumDType dtype ~ dtype,
+    AllDimsPositive '[batchSize, maxSeqLen, dmodel],
+    KnownDevice device, KnownDType dtype,
+    MatMulDTypeIsValid device dtype, 
+    SumDTypeIsValid device dtype,
+    MeanDTypeValidation device dtype
   ) =>
   -- | MLP model ADT for transformer
   TransformerMLP dmodel ffnDim dtype device ->
-  Tensor device dtype '[maxSeqLen, batchSize, dmodel] -> -- input
-  (Tensor device dtype '[maxSeqLen, batchSize, dmodel]) -- output
-transformerMLP TransformerMLP {..} x =
-  (`add` x)
-    . forward linear1
-    . (`geluApproximate` "tanh")
-    . forward linear0
-    $ forward ln x
+  Tensor device dtype '[batchSize, maxSeqLen, dmodel] -> -- input
+  TransformerMLPActivation device dtype batchSize maxSeqLen dmodel -- output
+transformerMLP TransformerMLP {..} x = TransformerMLPActivation {mlpLn = mlpLn, mlpCache = mlpCache, mlpOut = linear1Out, mlpResult = residPost}
+  where
+    mlpLn = layerNormForwardCached ln x
+    linear0Out = forward linear0 (runIdentity $ mlpLn ! Normalized)
+    actFnOut = linear0Out `geluApproximate` "tanh"
+    linear1Out = forward linear1 actFnOut
+    residPost = x `add` linear1Out
+    mlpCache = fromList [MLPpre ==> linear0Out, MLPpost ==> actFnOut]
 
 instance
   ( All KnownNat '[dmodel, ffnDim],
@@ -400,6 +450,44 @@ data
     TransformerLayer dmodel nhead ffnDim dtype device
   deriving (Show, Generic, Parameterized)
 
+std ::
+  forall dim keepOrDropDim shape' shape dtype device.
+  ( KnownNat dim,
+    KnownKeepOrDropDim keepOrDropDim,
+    shape' ~ ConditionalDropDimension shape dim keepOrDropDim,
+    MeanDTypeValidation device dtype,
+    AllDimsPositive shape
+  ) =>
+  Tensor device dtype shape ->
+  Tensor device dtype shape'
+std input =
+  unsafePerformIO $
+    ATen.cast3
+      ATen.Managed.std_tlb
+      input
+      (natValI @dim)
+      (keepOrDropDimVal @keepOrDropDim)
+
+layerNormForwardCached ::
+  forall (dmodel :: Nat) (seqLen :: Nat) (batchSize :: Nat) dtype device.
+  ( All KnownNat '[batchSize, seqLen, dmodel],
+    IsSuffixOf '[dmodel] '[batchSize, seqLen, dmodel],
+    MeanDTypeValidation device dtype,
+    AllDimsPositive '[batchSize, seqLen, dmodel]
+  ) =>
+  LayerNorm '[dmodel] dtype device ->
+  Tensor device dtype '[batchSize, seqLen, dmodel] ->
+  DMap (LayerNormCache device dtype batchSize seqLen dmodel) Identity
+layerNormForwardCached ln inp =
+  fromList
+    [ Scale ==> scale,
+      Normalized ==> result
+    ]
+  where
+    result = forward ln inp
+    -- The standard deviation over each token
+    scale = std @2 @KeepDim @'[batchSize, seqLen, 1] @'[batchSize, seqLen, dmodel] @dtype @device inp
+
 transformerLayer ::
   forall (nhead :: Nat) (ffnDim :: Nat) (dmodel :: Nat) (dhead :: Nat) (seqLen :: Nat) (batchSize :: Nat) dtype device.
   ( 1 <= nhead,
@@ -413,7 +501,9 @@ transformerLayer ::
     MatMulDTypeIsValid device dtype,
     BasicArithmeticDTypeIsValid device dtype,
     SumDTypeIsValid device dtype,
-    KnownDevice device
+    KnownDevice device,
+    MeanDTypeValidation device dtype,
+    AllDimsPositive '[batchSize, seqLen, dmodel]
   ) =>
   -- | transformer layer model ADT
   TransformerLayer dmodel nhead ffnDim dtype device ->
@@ -424,10 +514,24 @@ transformerLayer ::
   -- | transformer layer output representation
   (Tensor device dtype '[batchSize, seqLen, dmodel], DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity)
 transformerLayer TransformerLayer {..} attentionMask inp =
-  let inpNorm = forward transformerLayer_ln inp
-      (attnOut, attnCache) = multiheadAttention transformerLayer_mha attentionMask inpNorm
-   in -- _ <- print . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll . toDynamic $ fst r
-      (transformerMLP transformerLayer_mlp (inp `add` attnOut), _)
+  ( residPost,
+    fromList
+      [ ResidPre ==> inp,
+        Ln1 ==> lnCache,
+        Attn ==> attnCache,
+        AttnOut ==> attnOut,
+        ResidMid ==> residMid,
+        Ln2 ==> ln2,
+        MLP ==> mlpCache,
+        MLPOut ==> mlpOut,
+        ResidPost ==> residPost
+      ]
+  )
+  where
+    lnCache = layerNormForwardCached transformerLayer_ln inp
+    (attnOut, attnCache) = multiheadAttention transformerLayer_mha attentionMask (runIdentity $ lnCache ! Normalized)
+    residMid = inp `add` attnOut
+    TransformerMLPActivation ln2 mlpCache mlpOut residPost = transformerMLP transformerLayer_mlp residMid
 
 instance
   ( All KnownNat '[dmodel, dmodel, dmodel, nhead, ffnDim],
@@ -570,7 +674,9 @@ instance
     GeluDTypeIsValid device dtype,
     dtype ~ SumDType dtype,
     SumDTypeIsValid device dtype,
-    KnownDevice device
+    KnownDevice device,
+    MeanDTypeValidation device dtype,
+    AllDimsPositive '[batchSize, seqLen, dmodel]
   ) =>
   ApplyAB
     (FoldLayers batchSize seqLen dtype device)
@@ -632,11 +738,6 @@ transformerLM GPT2 {..} xTokens = do
       attentionMask' =
         pure . maskedFill attentionMask (-(1 / 0) :: Double) $
           zeros @'[batchSize, seqLen, seqLen] @dtype @device
-  -- _ <- print $ shape x
-  -- _ <- print (T.select 0 0 . T.squeezeAll $ toDynamic x)
-
-  -- (\final -> trace (show . T.sliceDim 0 0 5 1 . T.select 0 0 . T.squeezeAll $ toDynamic final) final) $
-  -- (\fin -> trace (show . T.select 0 0 . T.squeezeAll $ toDynamic fin) forward tProj fin) $
 
   let intermediateLayerOutputs :: HList (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel]))
       intermediateLayerOutputs = hScanr (FoldLayers attentionMask') x' tLayers
