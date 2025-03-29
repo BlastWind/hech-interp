@@ -168,7 +168,6 @@ deriving instance GEq (MLPCache device dtype batchSize seqLen dmodel)
 
 deriving instance GCompare (MLPCache device dtype batchSize seqLen dmodel)
 
-
 -- TODO not sure if we actually need this it's in the example
 -- deriveGEq ''CacheTag
 -- deriveGCompare ''CacheTag
@@ -375,8 +374,9 @@ transformerMLP ::
     IsSuffixOf '[dmodel] '[batchSize, maxSeqLen, dmodel],
     SumDType dtype ~ dtype,
     AllDimsPositive '[batchSize, maxSeqLen, dmodel],
-    KnownDevice device, KnownDType dtype,
-    MatMulDTypeIsValid device dtype, 
+    KnownDevice device,
+    KnownDType dtype,
+    MatMulDTypeIsValid device dtype,
     SumDTypeIsValid device dtype,
     MeanDTypeValidation device dtype
   ) =>
@@ -683,10 +683,14 @@ instance
     ( TransformerLayer dmodel nhead ffnDim dtype device,
       Tensor device dtype '[batchSize, seqLen, dmodel]
     )
-    (Tensor device dtype '[batchSize, seqLen, dmodel])
+    ( Tensor device dtype '[batchSize, seqLen, dmodel],
+      DMap
+        (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+        Identity
+    )
   where
   applyAB FoldLayers {..} (layer, x) = do
-    let (res, cache) = transformerLayer layer flAttentionMask x in res
+    let (res, cache) = transformerLayer layer flAttentionMask x in (res, cache)
 
 transformerLM ::
   forall
