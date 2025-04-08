@@ -4,9 +4,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -19,17 +17,15 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoStarIsType #-}
 {-# OPTIONS_GHC -fconstraint-solver-iterations=0 #-}
+{-# OPTIONS_GHC -fplugin GHC.TypeLits.Normalise #-}
 
 module GPT2.CachedModel where
 
 import Control.Monad
-import Data.Constraint.Extras.TH (deriveArgDict)
 import Data.Dependent.Map
-import Data.Dependent.Map (empty)
 import Data.Dependent.Sum ((==>))
 import Data.Functor.Identity (Identity (..))
 import Data.GADT.Compare
-import Data.Kind
 import Data.Proxy
 import qualified Data.Vector.Sized as V
 import Debug.Trace
@@ -40,12 +36,12 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Torch as T
 import qualified Torch.DType as D
 import qualified Torch.Device as D
-import Torch.HList
 import Torch.Internal.Cast (cast2)
 import qualified Torch.Internal.Cast as ATen
 import qualified Torch.Internal.Managed.Native as ATen.Managed
 import Torch.NN (HasForward (..))
 import qualified Torch.NN as A
+import qualified Torch.Typed as Tensor
 import Torch.Typed.Auxiliary
 import Torch.Typed.Factories
 import Torch.Typed.Functional hiding (linear, log, trace)
@@ -78,7 +74,7 @@ data
   where
   Embed :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers (Tensor device dtype '[batchSize, seqLen, dmodel])
   PosEmbed :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers (Tensor device dtype '[batchSize, seqLen, dmodel])
-  Blocks :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers [V.Vector nLayers (DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity)]
+  Blocks :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers (HList (HReplicateR nLayers (DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity)))
   LnFinal :: ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers (DMap (LayerNormCache device dtype batchSize seqLen dmodel) Identity)
 
 deriving instance GEq (ActivationCache device dtype batchSize seqLen dmodel dhead nhead nlayers)
@@ -557,6 +553,7 @@ data
   GPT2Spec
     (numAttnLayers :: Nat)
     (nhead :: Nat)
+    (dhead :: Nat)
     (ffnDim :: Nat)
     (paddingIdx :: Nat)
     (maxSeqLen :: Nat)
@@ -566,18 +563,19 @@ data
     (device :: (D.DeviceType, Nat))
   where
   GPT2Spec ::
-    forall numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device.
+    forall numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device.
     { -- | spec for each and every transformer layer
       lmLayerSpec :: TransformerLayerSpec dmodel nhead ffnDim dtype device,
       epsSpec'' :: Double
     } ->
-    GPT2Spec numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device
+    GPT2Spec numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device
   deriving (Show, Eq)
 
 data
   GPT2
     (numAttnLayers :: Nat)
     (nhead :: Nat)
+    (dhead :: Nat)
     (ffnDim :: Nat)
     (paddingIdx :: Nat)
     (maxSeqLen :: Nat)
@@ -587,26 +585,26 @@ data
     (device :: (D.DeviceType, Nat))
   where
   GPT2 ::
-    forall numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device.
+    forall numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device.
     { -- | token embedding
       tEmbedding :: Embedding ('Just paddingIdx) vocabSize dmodel 'Learned dtype device,
       -- | positional embedding
       tPosEmbedding :: Embedding 'Nothing maxSeqLen dmodel 'Constant dtype device,
       -- | transformer layers
-      tLayers :: HList (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device)),
+      tLayers :: HList (HReplicateR (Nat2HNat numAttnLayers) (TransformerLayer dmodel nhead ffnDim dtype device)),
       -- | final layer norm
       tFinalLN :: LayerNorm '[dmodel] dtype device,
       -- | final output projection
       tProj :: Linear dmodel vocabSize dtype device
     } ->
-    GPT2 numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device
+    GPT2 numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device
   deriving (Generic)
 
 deriving instance
   ( Show
       ( HList
           ( HReplicateR
-              numAttnLayers
+              (Nat2HNat numAttnLayers) 
               ( TransformerLayer
                   dmodel
                   nhead
@@ -617,12 +615,12 @@ deriving instance
           )
       )
   ) =>
-  Show (GPT2 numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
+  Show (GPT2 numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
 
 instance
   ( layers
       ~ HReplicateR
-          numAttnLayers
+          (Nat2HNat numAttnLayers)
           ( TransformerLayer
               dmodel
               nhead
@@ -641,15 +639,16 @@ instance
          Parameter device dtype '[vocabSize, dmodel],
          Parameter device dtype '[vocabSize]
        ]
-      ( Parameters (HList layers)
-          ++ '[ Parameter device dtype '[dmodel],
-                Parameter device dtype '[dmodel],
-                Parameter device dtype '[vocabSize, dmodel],
-                Parameter device dtype '[vocabSize]
-              ]
+      ( HAppendListR
+          (Parameters (HList layers))
+          '[ Parameter device dtype '[dmodel],
+             Parameter device dtype '[dmodel],
+             Parameter device dtype '[vocabSize, dmodel],
+             Parameter device dtype '[vocabSize]
+           ]
       )
   ) =>
-  Parameterized (GPT2 numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
+  Parameterized (GPT2 numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
 
 newtype
   FoldLayers
@@ -680,8 +679,12 @@ instance
   ) =>
   ApplyAB
     (FoldLayers batchSize seqLen dtype device)
-    ( TransformerLayer dmodel nhead ffnDim dtype device,
-      Tensor device dtype '[batchSize, seqLen, dmodel]
+    ( ( Tensor device dtype '[batchSize, seqLen, dmodel],
+        DMap
+          (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+          Identity
+      ),
+      TransformerLayer dmodel nhead ffnDim dtype device
     )
     ( Tensor device dtype '[batchSize, seqLen, dmodel],
       DMap
@@ -689,7 +692,7 @@ instance
         Identity
     )
   where
-  applyAB FoldLayers {..} (layer, x) = do
+  applyAB FoldLayers {..} ((x, _), layer) = do
     let (res, cache) = transformerLayer layer flAttentionMask x in (res, cache)
 
 transformerLM ::
@@ -700,35 +703,65 @@ transformerLM ::
     paddingIdx
     vocabSize
     dmodel
+    dhead
     seqLen
     maxSeqLen
     batchSize
     dtype
     device.
-  ( All KnownNat '[paddingIdx, dmodel, seqLen, batchSize],
+  ( All KnownNat '[vocabSize, paddingIdx, dmodel, seqLen, batchSize],
     IsSuffixOf '[dmodel] '[batchSize, seqLen, dmodel],
     paddingIdx + 1 <= vocabSize,
     1 <= seqLen,
-    HLast (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel])) (Tensor device dtype '[batchSize, seqLen, dmodel]),
-    HScanr
-      (FoldLayers batchSize seqLen dtype device)
-      (Tensor device dtype '[batchSize, seqLen, dmodel])
-      (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device))
-      (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel])),
     BasicArithmeticDTypeIsValid device dtype,
     ComparisonDTypeIsValid device dtype,
     ComparisonDTypeIsValid device 'D.Int64,
+    -- HLast
+    --   ( HReplicateR
+    --       numAttnLayers
+    --       ( Tensor device dtype [batchSize, seqLen, dmodel],
+    --         DMap
+    --           (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --           Identity
+    --       )
+    --   )
+    --   ( Tensor device dtype [batchSize, seqLen, dmodel],
+    --     DMap
+    --       (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --       Identity
+    --   ),
+    -- HScanlTail
+    --   (FoldLayers batchSize seqLen dtype device)
+    --   ( Tensor device dtype '[batchSize, seqLen, dmodel],
+    --     DMap
+    --       (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --       Identity
+    --   )
+    --   (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device))
+    --   ( HReplicateR
+    --       numAttnLayers
+    --       ( Tensor device dtype '[batchSize, seqLen, dmodel],
+    --         DMap
+    --           (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --           Identity
+    --       )
+    --   ),
     KnownDType dtype,
-    KnownDevice device
+    KnownDevice device,
+    MeanDTypeValidation device dtype,
+    AllDimsPositive '[batchSize, seqLen, dmodel]
   ) =>
-  GPT2 numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device ->
+  GPT2 numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device ->
   Tensor device 'D.Int64 '[batchSize, seqLen] ->
-  (Tensor device dtype '[batchSize, seqLen, vocabSize], GPT2ActivationCache device batchSize seqLen)
+  ( Tensor device dtype '[batchSize, seqLen, vocabSize],
+    DMap
+      (ActivationCache device dtype batchSize seqLen dmodel dhead nhead numAttnLayers)
+      Identity
+  )
 transformerLM GPT2 {..} xTokens = do
   let x = embed tEmbedding xTokens
       positions =
         expand @'[batchSize, seqLen, dmodel] True
-          -- . (\pos_emb -> trace (show . T.select 0 0 $ toDynamic pos_emb) pos_emb)
           . embed tPosEmbedding
           . Torch.Typed.Tensor.toDType @D.Int64
           . linspace @seqLen (0 :: Int)
@@ -740,35 +773,81 @@ transformerLM GPT2 {..} xTokens = do
           . triu 1
           $ ones @'[seqLen, seqLen] @D.Int8 @device
       attentionMask' =
-        pure . maskedFill attentionMask (-(1 / 0) :: Double) $
+        maskedFill attentionMask (-(1 / 0) :: Double) $
           zeros @'[batchSize, seqLen, seqLen] @dtype @device
 
-  let intermediateLayerOutputs :: HList (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel]))
-      intermediateLayerOutputs = hScanr (FoldLayers attentionMask') x' tLayers
-      l = hLast intermediateLayerOutputs
-  (forward tProj $ forward tFinalLN l, empty)
+  let emp :: DMap (BlockCache device dtype batchSize seqLen dmodel dhead nhead) Identity
+      emp = empty
+      intermediateLayerOutputs ::
+        HList
+          ( HReplicateR
+              (Nat2HNat numAttnLayers) 
+              ( Tensor device dtype '[batchSize, seqLen, dmodel],
+                DMap
+                  (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+                  Identity
+              )
+          )
+      intermediateLayerOutputs = hScanlTail (FoldLayers (Just attentionMask')) (x', emp) tLayers
+      (finalOut, _) = hLast intermediateLayerOutputs
+      finalLnCache = layerNormForwardCached tFinalLN finalOut
+      finalDist = forward tProj $ runIdentity (finalLnCache ! Normalized)
+  (finalDist, fromList [Embed ==> x, PosEmbed ==> x', LnFinal ==> finalLnCache])
 
 instance
-  ( All KnownNat '[paddingIdx, dmodel, seqLen, batchSize, seqLen],
+  ( All KnownNat '[vocabSize, paddingIdx, dmodel, seqLen, batchSize, seqLen],
     IsSuffixOf '[dmodel] '[batchSize, seqLen, dmodel],
     paddingIdx + 1 <= vocabSize,
     1 <= seqLen,
-    HLast (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel])) (Tensor device dtype '[batchSize, seqLen, dmodel]),
-    HScanr
-      (FoldLayers batchSize seqLen dtype device)
-      (Tensor device dtype '[batchSize, seqLen, dmodel])
-      (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device))
-      (HReplicateR numAttnLayers (Tensor device dtype '[batchSize, seqLen, dmodel])),
+    -- HLast
+    --   ( HReplicateR
+    --       numAttnLayers
+    --       ( Tensor device dtype [batchSize, seqLen, dmodel],
+    --         DMap
+    --           (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --           Identity
+    --       )
+    --   )
+    --   ( Tensor device dtype [batchSize, seqLen, dmodel],
+    --     DMap
+    --       (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --       Identity
+    --   ),
+    -- HScanlTail
+    --   (FoldLayers batchSize seqLen dtype device)
+    --   ( Tensor device dtype '[batchSize, seqLen, dmodel],
+    --     DMap
+    --       (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --       Identity
+    --   )
+    --   (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device))
+    --   ( HReplicateR
+    --       numAttnLayers
+    --       ( Tensor device dtype '[batchSize, seqLen, dmodel],
+    --         DMap
+    --           (BlockCache device dtype batchSize seqLen dmodel dhead nhead)
+    --           Identity
+    --       )
+    --   ),
     BasicArithmeticDTypeIsValid device dtype,
     ComparisonDTypeIsValid device dtype,
     ComparisonDTypeIsValid device 'D.Int64,
     KnownDType dtype,
-    KnownDevice device
+    KnownDevice device,
+    MeanDTypeValidation device dtype,
+    AllDimsPositive '[batchSize, seqLen, dmodel]
   ) =>
-  HasForward (GPT2 numAttnLayers nhead ffnDim paddingIdx seqLen vocabSize dmodel dtype device) (Tensor device 'D.Int64 '[batchSize, seqLen]) (Tensor device dtype '[batchSize, seqLen, vocabSize])
+  HasForward
+    (GPT2 numAttnLayers nhead dhead ffnDim paddingIdx seqLen vocabSize dmodel dtype device)
+    (Tensor device 'D.Int64 '[batchSize, seqLen])
+    ( Tensor device dtype '[batchSize, seqLen, vocabSize],
+      DMap
+        (ActivationCache device dtype batchSize seqLen dmodel dhead nhead numAttnLayers)
+        Identity
+    )
   where
-  forwardStoch model input = return $ fst $ transformerLM model input
-  forward model input = fst $ transformerLM model input
+  forwardStoch model input = return $ transformerLM model input
+  forward = transformerLM
 
 sinusoidal ::
   forall vocabSize dmodel device.
@@ -796,7 +875,7 @@ sinusoidal =
           . linspace @(Div dmodel 2) (0 :: Int)
           $ natValI @(Div dmodel 2 - 1)
       radians = mul positions scalingFactors
-      weights = stack @2 (sin radians :. cos radians :. HNil)
+      weights = stack @2 (sin radians Tensor.:. cos radians Tensor.:. Tensor.HNil)
    in reshape weights
 
 instance
@@ -807,10 +886,10 @@ instance
     (((vocabSize - paddingIdx) - 1) + (1 + paddingIdx)) ~ vocabSize,
     (Div dmodel 2 * 2) ~ dmodel,
     All KnownNat '[ffnDim, paddingIdx, vocabSize, maxSeqLen, dmodel],
-    HReplicate numAttnLayers (TransformerLayerSpec dmodel nhead ffnDim dtype device),
+    HReplicate (Nat2HNat numAttnLayers)  (TransformerLayerSpec dmodel nhead ffnDim dtype device),
     A.Randomizable
-      (HList (HReplicateR numAttnLayers (TransformerLayerSpec dmodel nhead ffnDim dtype device)))
-      (HList (HReplicateR numAttnLayers (TransformerLayer dmodel nhead ffnDim dtype device))),
+      (HList (HReplicateR (Nat2HNat numAttnLayers)  (TransformerLayerSpec dmodel nhead ffnDim dtype device)))
+      (HList (HReplicateR (Nat2HNat numAttnLayers)  (TransformerLayer dmodel nhead ffnDim dtype device))),
     KnownDType dtype,
     RandDTypeIsValid device dtype,
     StandardFloatingPointDTypeValidation device 'D.Float,
@@ -818,13 +897,13 @@ instance
     KnownDevice device
   ) =>
   A.Randomizable
-    (GPT2Spec numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
-    (GPT2 numAttnLayers nhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
+    (GPT2Spec numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
+    (GPT2 numAttnLayers nhead dhead ffnDim paddingIdx maxSeqLen vocabSize dmodel dtype device)
   where
   sample GPT2Spec {..} =
     GPT2
       <$> A.sample (LearnedEmbeddingWithRandomInitSpec @('Just paddingIdx))
       <*> A.sample (ConstEmbeddingSpec @'Nothing (Torch.Typed.Tensor.toDType sinusoidal))
-      <*> A.sample (hreplicate @numAttnLayers lmLayerSpec)
+      <*> A.sample (hReplicate @(Nat2HNat numAttnLayers) lmLayerSpec)
       <*> A.sample (LayerNormSpec epsSpec'')
       <*> A.sample LinearSpec

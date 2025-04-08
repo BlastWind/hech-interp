@@ -46,6 +46,7 @@ common base
     , tiktoken
     , megaparsec < 9.7
     , vector-sized
+    , HList == 0.5.4.0
 
 
 common binary-base
