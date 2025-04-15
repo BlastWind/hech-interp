@@ -14,18 +14,23 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module GPT2.HListExtensions where
 
 import Data.Kind (Type)
 import GHC.TypeLits
 import Unsafe.Coerce (unsafeCoerce)
+import GHC.Exts (IsList (..))
 
 data family HList (l :: [Type])
 
 data instance HList '[] = HNil
 
 data instance HList (x ': xs) = x `HCons` HList xs
+
+pattern (:.) :: forall x (xs :: [Type]). x -> HList xs -> HList (x : xs)
+pattern (:.) x xs = HCons x xs
 
 type family HReplicateR (n :: Nat) (e :: Type) :: [Type] where
   HReplicateR 0 _ = '[]
@@ -121,3 +126,23 @@ foo ::
   HList (HReplicateR n Int) ->
   HList (HReplicateR (n + 1) Int)
 foo = hScanlC (+) 0
+
+
+instance IsList (Maybe (HList '[(a :: Type)])) where
+  type Item (Maybe (HList '[(a :: Type)])) = a
+  fromList [x] = liftA2 (:.) (Just x) (Just HNil)
+  fromList _ = Nothing
+  toList Nothing = []
+  toList (Just (x :. HNil)) = [x]
+
+instance
+  ( IsList (Maybe (HList (a ': as))),
+    a ~ Item (Maybe (HList (a ': as)))
+  ) =>
+  IsList (Maybe (HList ((a :: Type) ': a ': as)))
+  where
+  type Item (Maybe (HList (a ': a ': as))) = a
+  fromList (x : xs) = liftA2 (:.) (Just x) (fromList xs)
+  fromList _ = Nothing
+  toList Nothing = []
+  toList (Just (x :. xs)) = x : toList (Just xs)

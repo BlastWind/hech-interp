@@ -42,10 +42,10 @@ common base
     , dependent-map
     , constraints-extras
     , dependent-sum
+    , dependent-sum-template
     , constraints
     , tiktoken
     , megaparsec < 9.7
-    , vector-sized
     , HList == 0.5.4.0
 
 
@@ -60,7 +60,7 @@ library
   exposed-modules:
     GPT2
     GPT2.Loader
-    GPT2.Model
+    GPT2.CachedModel
     SafeTensors
   hs-source-dirs: src
   ghc-options:

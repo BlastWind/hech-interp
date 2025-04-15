@@ -24,24 +24,21 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Maybe
 import Data.ByteString.Char8 (pack)
 import Data.Constraint
-import Data.Dependent.Map
-import Data.Functor.Identity
 import Data.Proxy
 import GHC.Int (Int64)
 import GHC.TypeLits
 import GPT2.CachedModel
-import GPT2.HListExtensions
 import GPT2.Loader
 import SafeTensors hiding (shape)
 import System.Environment (getArgs)
 import Tiktoken (r50k_base, toRanks)
 import qualified Torch as UT
 import qualified Torch.DType as D
-import qualified Torch.Device as D
 import Torch.Internal.Cast (cast2)
 import qualified Torch.Internal.Managed.Native as ATen.Managed
 import Torch.Typed hiding (length, sample, transformerLM)
 import Unsafe.Coerce (unsafeCoerce)
+import Data.Dependent.Map ((!))
 
 type family MultinomialCheck (n :: Nat) (shape :: [Nat]) (dim :: Nat) (sat :: Maybe Nat) (result :: Maybe a) :: a where
   MultinomialCheck _ shape dim _ Nothing = DimOutOfBound shape dim
@@ -116,6 +113,7 @@ runInference (fp :: FilePath) = do
     do
       dict <- hoistMaybe $ mkNumTokensProof @numTokens proxy
       let (result, cache) = infer @numTokens dict model [Prelude.map fromIntegral tokens]
+          a = cache ! Blocks
       lift $ sample result
 
 -- | Example: `cabal run -- /Users/jane.doe/model.safetensors`, must be absolute!

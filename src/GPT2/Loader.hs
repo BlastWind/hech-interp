@@ -9,16 +9,16 @@ import Control.Monad.Trans.Maybe
 import GHC.Exts (IsList (fromList))
 import GHC.Utils.Monad (zipWith3M)
 import GPT2.CachedModel
+import GPT2.HListExtensions
 import SafeTensors
 import qualified Torch as UT
 import qualified Torch.DType as D
-import Torch.HList
 import Torch.Typed hiding
   ( MultiheadAttention,
     TransformerLayer,
     TransformerMLP,
     keys,
-    transformerLM,
+    transformerLM, HList, HReplicateR
   )
 import Prelude hiding (lookup)
 
