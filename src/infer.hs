@@ -9,6 +9,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -23,16 +24,20 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Maybe
 import Data.ByteString.Char8 (pack)
 import Data.Constraint
+import Data.Dependent.Map
+import Data.Functor.Identity
 import Data.Proxy
 import GHC.Int (Int64)
 import GHC.TypeLits
+import GPT2.CachedModel
+import GPT2.HListExtensions
 import GPT2.Loader
-import GPT2.Model (transformerLM)
 import SafeTensors hiding (shape)
 import System.Environment (getArgs)
 import Tiktoken (r50k_base, toRanks)
 import qualified Torch as UT
 import qualified Torch.DType as D
+import qualified Torch.Device as D
 import Torch.Internal.Cast (cast2)
 import qualified Torch.Internal.Managed.Native as ATen.Managed
 import Torch.Typed hiding (length, sample, transformerLM)
@@ -90,7 +95,7 @@ infer ::
   Dict ((1 <=? numTokens) ~ 'True) ->
   Model ->
   [[Int64]] ->
-  Tensor ModelDevice UT.Float '[1, numTokens, VocabSize]
+  (Tensor ModelDevice UT.Float '[1, numTokens, VocabSize], GPT2ActivationCache ModelDevice 1 numTokens)
 infer Dict model tokens =
   transformerLM model
     $ UnsafeMkTensor
@@ -100,7 +105,7 @@ infer Dict model tokens =
     $ UT.asTensor tokens
 
 -- | returns the next token prediction, already sampled
--- [1, 1] indicates a batch size of 1 and a sequence length of 1 
+-- [1, 1] indicates a batch size of 1 and a sequence length of 1
 runInference :: FilePath -> MaybeT IO (Tensor ModelDevice 'Int64 [1, 1])
 runInference [] = hoistMaybe Nothing
 runInference (fp :: FilePath) = do
@@ -110,7 +115,7 @@ runInference (fp :: FilePath) = do
   withNat (length tokens) $ \(proxy :: Proxy numTokens) ->
     do
       dict <- hoistMaybe $ mkNumTokensProof @numTokens proxy
-      let result = infer @numTokens dict model [map fromIntegral tokens]
+      let (result, cache) = infer @numTokens dict model [Prelude.map fromIntegral tokens]
       lift $ sample result
 
 -- | Example: `cabal run -- /Users/jane.doe/model.safetensors`, must be absolute!

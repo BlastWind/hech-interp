@@ -8,7 +8,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Maybe
 import GHC.Exts (IsList (fromList))
 import GHC.Utils.Monad (zipWith3M)
-import GPT2.Model
+import GPT2.CachedModel
 import SafeTensors
 import qualified Torch as UT
 import qualified Torch.DType as D
@@ -30,6 +30,8 @@ type NumAttnLayers = 12
 
 type NumHeads = 12
 
+type HeadDim = 64
+
 type FFNDim = 3072
 
 type PaddingIdx = 0
@@ -42,6 +44,7 @@ type Model =
   GPT2
     NumAttnLayers
     NumHeads
+    HeadDim
     FFNDim
     PaddingIdx
     MaxSeqLen
@@ -54,6 +57,7 @@ type ModelSpec =
   GPT2Spec
     NumAttnLayers
     NumHeads
+    HeadDim
     FFNDim
     PaddingIdx
     MaxSeqLen
@@ -213,6 +217,7 @@ loadGPT2FromSafeTensors ::
     ( GPT2
         NumAttnLayers
         NumHeads
+        HeadDim
         FFNDim
         PaddingIdx
         MaxSeqLen
