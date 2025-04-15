@@ -46,7 +46,6 @@ common base
     , constraints
     , tiktoken
     , megaparsec < 9.7
-    , HList == 0.5.4.0
 
 
 common binary-base
