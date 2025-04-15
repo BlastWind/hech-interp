@@ -20,4 +20,3 @@ extra-deps:
   - psqueues-0.2.8.0
   - hasktorch-0.2.1.3@sha256:ccb99b703f2c8b2ea1c5f4ad2482bb2a451804b3ddee0499b8f610ea401f08c3,10794
   - tiktoken-1.0.3@sha256:5d9b67982d1c24d0556f94ab1f542948ef9d73cc14bd301d5536390832df7858,2401
-  - hackage: HList-0.5.4.0
