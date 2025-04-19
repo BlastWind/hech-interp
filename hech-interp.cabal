@@ -60,6 +60,8 @@ library
     GPT2
     GPT2.Loader
     GPT2.CachedModel
+    GPT2.HListExtensions
+    GPT2.AList
     SafeTensors
   hs-source-dirs: src
   ghc-options:
