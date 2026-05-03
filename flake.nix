@@ -38,6 +38,7 @@
           binary
           bytestring
           containers
+          tiktoken
         ]);
         
         # Create a separate HLS derivation using the same package set
