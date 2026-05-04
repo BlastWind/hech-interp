@@ -22,9 +22,35 @@ and everything should work.
 need to `stack ghci` because the `ghci` is in a nix environment with the packages you already need.
 I.e., you can `import Torch` in your `ghci` and it should work.
 
-For VSCode users, in order to get HLS linting support, you can choose to either
-1. Launch this repo within the `nix` shell that was opened by `nix develop`, or
-2. Install [direnv](https://github.com/direnv/direnv-vscode), call `direnv allow` on this repo. When you reopen this repo, `direnv` will automatically load `.envrc`.
+### Using direnv (recommended)
+
+`direnv` auto-loads the dev shell on `cd`, and `nix-direnv` caches it so re-entry is instant
+and re-evaluates automatically when `flake.nix` changes (no manual `exit` + `nix develop`).
+
+Install both via Nix (works regardless of OS):
+```sh
+nix profile install nixpkgs#direnv nixpkgs#nix-direnv
+```
+
+Wire `direnv` into your shell. For fish, add to `~/.config/fish/config.fish`:
+```fish
+direnv hook fish | source
+```
+(For bash/zsh see <https://direnv.net/docs/hook.html>.)
+
+Tell `direnv` to use `nix-direnv` (one-time, per machine):
+```sh
+mkdir -p ~/.config/direnv
+echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc
+```
+
+Then in this repo:
+```sh
+direnv allow
+```
+
+For VSCode users, install [direnv-vscode](https://github.com/direnv/direnv-vscode) so HLS picks
+up the env automatically.
 
 ## Apple Specific
 Apple uses the MPS backend. There is a `toMPS` function that deals with this. Try this in your `ghci` shell:
