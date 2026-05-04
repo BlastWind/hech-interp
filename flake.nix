@@ -10,6 +10,24 @@
   outputs = { self, nixpkgs, utils  }:
     utils.lib.eachDefaultSystem (system:
       let
+        # Apply megaparsec override at pkgs level via overlay so that
+        # *every* consumer of ghc984 (including IHaskell) sees it. Without
+        # this, IHaskell's package set would try to build tiktoken-1.0.3
+        # against megaparsec-9.7 and fail (tiktoken pins megaparsec < 9.7).
+        haskellOverlay = final: prev: {
+          haskell = prev.haskell // {
+            packages = prev.haskell.packages // {
+              ghc984 = prev.haskell.packages.ghc984.override (old: {
+                overrides = prev.lib.composeExtensions
+                  (old.overrides or (_: _: {}))
+                  (hself: hsuper: {
+                    megaparsec = hself.callHackage "megaparsec" "9.6.1" {};
+                  });
+              });
+            };
+          };
+        };
+
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
@@ -18,16 +36,12 @@
           config.cudaSupport = system == "x86_64-linux";
           config.ihaskell.packages = pkgs: with pkgs; [
             hasktorch
+            tiktoken
           ];
+          overlays = [ haskellOverlay ];
         };
-        
-        haskellPackages = pkgs.haskell.packages.ghc984.override {
-          overrides = self: super: {
-            # Override megaparsec to use version 9.6.1 instead of 9.7.0
-            # so that tiktoken-1.0.3 builds
-            megaparsec = self.callHackage "megaparsec" "9.6.1" {};
-          };
-        };
+
+        haskellPackages = pkgs.haskell.packages.ghc984;
         
         # Use the custom package set for GHC and dependencies
         ghcWithHasktorch = haskellPackages.ghcWithPackages (pkgs: with pkgs; [
@@ -39,6 +53,7 @@
           bytestring
           containers
           tiktoken
+          unordered-containers
         ]);
         
         # Create a separate HLS derivation using the same package set

@@ -1,4 +1,15 @@
 packages:
     ./
 
-allow-newer: all
+-- Pin to the exact versions the Nix dev shell provides via ghcWithHasktorch.
+-- This makes cabal reuse the pre-built packages from /nix/store instead of
+-- fetching newer ones from Hackage (which drags in different transitive deps
+-- like http-client-tls that fail to build under our package set).
+constraints:
+    hasktorch == 0.2.1.3
+  , libtorch-ffi == 2.0.1.3
+  , libtorch-ffi-helper == 2.0.0.2
+  , aeson == 2.2.3.0
+  , megaparsec == 9.6.1
+  , tiktoken == 1.0.3
+  , unordered-containers == 0.2.20

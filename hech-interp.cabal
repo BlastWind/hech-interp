@@ -46,6 +46,7 @@ common base
     , constraints
     , tiktoken
     , megaparsec < 9.7
+    , unordered-containers
 
 
 common binary-base

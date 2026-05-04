@@ -11,15 +11,19 @@ import qualified Data.Aeson.KeyMap as K
 import Data.Binary.Get
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as B
+import qualified Data.HashMap.Strict as HM
 import qualified Data.Map as M
-import Data.Maybe (listToMaybe)
 import qualified Foreign.ForeignPtr as F
 import qualified Foreign.Marshal.Utils as FU
 import qualified Foreign.Ptr as F
 import GHC.Generics
 import Torch hiding (shape)
 
-type SafeTensors = M.Map SafeTensorKey Tensor
+-- | Public type: tensors keyed by name. The byte-offset ordering used during
+--   parsing (see 'SafeTensorKey') is an internal concern — by the time
+--   tensors land here, only name-based lookup matters, so we use a HashMap
+--   for O(1) lookup.
+type SafeTensors = HM.HashMap String Tensor
 
 class SafeTensorsModel a where
   load :: SafeTensors -> a
@@ -46,6 +50,11 @@ instance Ord TensorData where
 instance FromJSON TensorData
 
 -- ----
+-- | Internal key type used during the parse pass only. The point of carrying
+--   the byte offset is so that the @Ord@ instance sorts entries by file
+--   offset, which makes 'readTensors' walk the underlying ByteString
+--   sequentially (each tensor's bytes follow the previous one's). Outside the
+--   parser, tensors are re-keyed by name — see 'SafeTensors'.
 data SafeTensorKey = SafeTensorKey {key :: !String, value :: !Int}
   deriving (Show)
 
@@ -55,9 +64,8 @@ instance Eq SafeTensorKey where
 instance Ord SafeTensorKey where
   x <= y = value x <= value y
 
--- TODO: Replcace. Very inefficient
-lookupWithSafeTensorKey :: String -> M.Map SafeTensorKey a -> Maybe a
-lookupWithSafeTensorKey k = listToMaybe . map snd . filter ((== k) . key . fst) . M.toList
+lookupWithSafeTensorKey :: String -> SafeTensors -> Maybe Tensor
+lookupWithSafeTensorKey = HM.lookup
 
 -- ----
 
@@ -99,10 +107,15 @@ readTensors :: SafeTensorMetadata -> Get (IO SafeTensors)
 readTensors meta = do
   metaLen <- getInt64le
   _ <- skip $ fromIntegral metaLen
+  -- 'mapM getTensor tmap' walks the map in ascending key order, which is
+  -- ascending byte-offset order (see SafeTensorKey's Ord instance), so the
+  -- underlying Get pulls tensor bytes sequentially. Once tensors are read,
+  -- we re-key by name into a HashMap for the public API.
   tensorIOs <- mapM getTensor tmap
-  return $ sequence tensorIOs
+  return $ rekey <$> sequence tensorIOs
   where
     tmap = tensorData meta
+    rekey = HM.fromList . map (\(k, v) -> (key k, v)) . M.toList
 
 getMetadata :: Get B.ByteString
 getMetadata = do
